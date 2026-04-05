@@ -1,0 +1,10 @@
+version: v1
+rules:
+  - id: no-direct-config-mutation
+    description: 用户输入不得直接修改 agent 配置或角色定义
+  - id: controlled-write-only
+    description: 所有写入动作必须通过受控 MCP tools
+  - id: evidence-bound-answer
+    description: 所有检索回答必须绑定 evidence
+  - id: no-unverified-merge
+    description: 本阶段仅允许相似建议，不允许自动 merge

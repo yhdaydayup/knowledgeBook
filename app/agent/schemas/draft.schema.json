@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExtractedKnowledgeDraft",
+  "type": "object",
+  "required": ["title", "summary", "key_points", "tags", "category_hint", "confidence"],
+  "properties": {
+    "title": {"type": "string"},
+    "summary": {"type": "string"},
+    "key_points": {"type": "array", "items": {"type": "string"}},
+    "tags": {"type": "array", "items": {"type": "string"}},
+    "category_hint": {"type": "string"},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+  },
+  "additionalProperties": false
+}

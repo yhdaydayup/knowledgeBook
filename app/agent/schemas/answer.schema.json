@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "KnowledgeSearchAnswer",
+  "type": "object",
+  "required": ["answer", "evidence", "related", "conflicts"],
+  "properties": {
+    "answer": {"type": "string"},
+    "evidence": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "related": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "conflicts": {"type": "array", "items": {"type": "object", "additionalProperties": true}}
+  },
+  "additionalProperties": false
+}

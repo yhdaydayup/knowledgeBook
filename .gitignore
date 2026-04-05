@@ -1,0 +1,9 @@
+.DS_Store
+
+# local deploy config
+deploy/.env
+deploy/.env.bak.*
+deploy/data/
+
+# local backups
+backups/

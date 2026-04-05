@@ -1,0 +1,19 @@
+FROM --platform=$BUILDPLATFORM golang:1.24 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /app
+COPY go.mod ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -o /out/app-server ./cmd/app-server
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /out/app-server /app/app-server
+COPY app /app/app
+COPY migrations /app/migrations
+EXPOSE 8080
+CMD ["/app/app-server"]

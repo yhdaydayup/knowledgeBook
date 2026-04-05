@@ -1,0 +1,25 @@
+version: v1
+tools:
+  - name: create_knowledge_draft
+    phase: phase1
+  - name: get_knowledge_draft
+    phase: phase1
+  - name: confirm_knowledge_draft
+    phase: phase1
+  - name: check_similarity
+    phase: phase1
+  - name: get_similarity_candidates
+    phase: phase1
+  - name: search_knowledge
+    phase: phase1
+  - name: get_knowledge
+    phase: phase1
+  - name: get_related_knowledge
+    phase: phase1
+future_tools:
+  - merge_knowledge
+  - resolve_knowledge_conflict
+  - update_knowledge
+  - delete_knowledge
+  - restore_knowledge
+  - sync_from_doc

@@ -1,0 +1,12 @@
+version: v1
+memory:
+  backend: database
+  configMutableByUserInput: false
+  writeRules:
+    - 用户偏好可以进入 runtime memory
+    - 长期使用习惯可以进入 runtime memory
+    - 纠错反馈可以进入 runtime memory
+    - agent 角色、prompt、schema、policy 不可由用户输入直接修改
+  reviewNeededFor:
+    - 高风险偏好变更
+    - 涉及权限或安全边界的记忆写入

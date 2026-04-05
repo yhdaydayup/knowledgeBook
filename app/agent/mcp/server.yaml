@@ -1,0 +1,7 @@
+version: v1
+mode: embedded
+hostService: app-server
+transport: in-process
+notes:
+  - 当前阶段采用嵌入式 MCP Server
+  - 后续如需远程化，可在不改 tool schema 的前提下迁移

@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: knowledgebook-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+
+  redis:
+    image: redis:7
+    container_name: knowledgebook-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  app-server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    container_name: knowledgebook-app-server
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+
+  app-worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+    container_name: knowledgebook-app-worker
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+    env_file:
+      - .env
+
+volumes:
+  postgres_data:
+  redis_data:

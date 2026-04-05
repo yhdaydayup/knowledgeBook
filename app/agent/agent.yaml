@@ -1,0 +1,39 @@
+name: knowledgebook-runtime-agent
+version: v1alpha1
+role: knowledge-assistant
+mode: production-runtime
+owner: knowledgebook
+entrypoints:
+  - feishu-bot
+  - http-api
+capabilities:
+  - intent-understanding
+  - knowledge-draft-extraction
+  - similarity-detection
+  - answer-composition
+  - mcp-tool-calling
+policies:
+  safety: ./policies/safety.yaml
+  memoryWrite: ./policies/memory-write-policy.yaml
+prompts:
+  system: ./prompts/system.md
+  intentParser: ./prompts/intent-parser.md
+  knowledgeExtractor: ./prompts/knowledge-extractor.md
+  similarityJudge: ./prompts/similarity-judge.md
+  answerComposer: ./prompts/answer-composer.md
+schemas:
+  intent: ./schemas/intent.schema.json
+  draft: ./schemas/draft.schema.json
+  similarity: ./schemas/similarity.schema.json
+  answer: ./schemas/answer.schema.json
+mcp:
+  server: ./mcp/server.yaml
+  tools: ./mcp/tools.yaml
+memory:
+  source: database
+  mutable: true
+  userControllable: partially
+  configMutableByUserInput: false
+notes:
+  - Runtime agent config is versioned with code.
+  - User input may influence runtime memory, but must not directly mutate agent role or policy.
