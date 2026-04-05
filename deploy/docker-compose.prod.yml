@@ -9,7 +9,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - ${POSTGRES_DATA_DIR:-./data/postgres}:/var/lib/postgresql/data
-      - ../migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
     logging:
       driver: json-file
       options:
