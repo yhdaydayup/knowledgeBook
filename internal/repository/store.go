@@ -278,7 +278,56 @@ RETURNING id, user_id, input_type, input_text, COALESCE(title,''), COALESCE(summ
 	return &d, nil
 }
 
-func (s *Store) ExpirePendingDrafts(ctx context.Context, limit int) ([]int64, error) {
+// UpdateDraftCardMessageID stores the Feishu card message ID after sending.
+func (s *Store) UpdateDraftCardMessageID(ctx context.Context, draftID int64, cardMessageID string) error {
+	_, err := s.DB.Exec(ctx, `UPDATE knowledge_drafts SET card_message_id=$1, updated_at=NOW() WHERE id=$2`, cardMessageID, draftID)
+	return err
+}
+
+// ListTopCategoryPaths returns the user's most-used category paths.
+func (s *Store) ListTopCategoryPaths(ctx context.Context, userID int64, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	rows, err := s.DB.Query(ctx, `
+SELECT category_path, COUNT(*) AS cnt
+FROM knowledge_items
+WHERE user_id=$1 AND status='ACTIVE' AND COALESCE(category_path,'') != ''
+GROUP BY category_path
+ORDER BY cnt DESC
+LIMIT $2
+`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var paths []string
+	for rows.Next() {
+		var path string
+		var cnt int
+		if err := rows.Scan(&path, &cnt); err != nil {
+			continue
+		}
+		paths = append(paths, path)
+	}
+	return paths, rows.Err()
+}
+
+// CountPendingDraftsByChat returns the number of pending drafts in a chat.
+func (s *Store) CountPendingDraftsByChat(ctx context.Context, userID int64, chatID string) (int, error) {
+	var count int
+	err := s.DB.QueryRow(ctx, `SELECT COUNT(*) FROM knowledge_drafts WHERE user_id=$1 AND chat_id=$2 AND status='PENDING_CONFIRMATION'`, userID, chatID).Scan(&count)
+	return count, err
+}
+
+// ExpiredDraftInfo holds the minimal fields needed to update a card after expiration.
+type ExpiredDraftInfo struct {
+	ID            int64
+	Title         string
+	CardMessageID string
+}
+
+func (s *Store) ExpirePendingDrafts(ctx context.Context, limit int) ([]ExpiredDraftInfo, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -291,21 +340,21 @@ WHERE id IN (
   ORDER BY expires_at ASC
   LIMIT $1
 )
-RETURNING id
+RETURNING id, COALESCE(title,''), COALESCE(card_message_id,'')
 `, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	ids := make([]int64, 0)
+	var results []ExpiredDraftInfo
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var info ExpiredDraftInfo
+		if err := rows.Scan(&info.ID, &info.Title, &info.CardMessageID); err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		results = append(results, info)
 	}
-	return ids, rows.Err()
+	return results, rows.Err()
 }
 
 func (s *Store) ListDraftsNeedingReminder(ctx context.Context, reminderBefore time.Duration, limit int) ([]model.Draft, error) {

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -16,15 +17,16 @@ import (
 
 // Services wires repository access, runtime agent resources and optional LLM integration.
 type Services struct {
-	Store *repository.Store
-	Cfg   config.Config
-	Agent *agent.Runtime
-	LLM   llm.Client
+	Store     *repository.Store
+	Cfg       config.Config
+	Agent     *agent.Runtime
+	LLM       llm.Client
+	Messenger *feishu.Messenger
 }
 
 // New constructs the service layer with repository access, runtime prompts and optional LLM support.
-func New(store *repository.Store, cfg config.Config, runtimeAgent *agent.Runtime, llmClient llm.Client) *Services {
-	return &Services{Store: store, Cfg: cfg, Agent: runtimeAgent, LLM: llmClient}
+func New(store *repository.Store, cfg config.Config, runtimeAgent *agent.Runtime, llmClient llm.Client, messenger *feishu.Messenger) *Services {
+	return &Services{Store: store, Cfg: cfg, Agent: runtimeAgent, LLM: llmClient, Messenger: messenger}
 }
 
 type BotCommandResult struct {
@@ -88,6 +90,53 @@ func recommendCategory(content, explicit string) (string, float64, bool) {
 	}
 }
 
+// recommendCandidateCategories aggregates multiple category path candidates
+// from LLM hint, keyword rules and user's most-used paths. Returns up to 5.
+func recommendCandidateCategories(content, llmHint string, existingPaths []string) []string {
+	seen := map[string]struct{}{}
+	var result []string
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		result = append(result, path)
+	}
+	if llmHint != "" {
+		add(llmHint)
+	}
+	lower := strings.ToLower(content)
+	rules := []struct {
+		keywords []string
+		path     string
+	}{
+		{[]string{"接口", "api", "登录"}, "工作/默认项目/接口设计"},
+		{[]string{"需求", "prd"}, "工作/默认项目/需求讨论"},
+		{[]string{"bug", "缺陷", "修复"}, "工作/默认项目/问题修复"},
+		{[]string{"部署", "发布", "上线"}, "工作/默认项目/部署运维"},
+		{[]string{"设计", "方案", "架构"}, "工作/默认项目/技术方案"},
+	}
+	for _, rule := range rules {
+		for _, kw := range rule.keywords {
+			if strings.Contains(lower, kw) {
+				add(rule.path)
+				break
+			}
+		}
+	}
+	for _, path := range existingPaths {
+		add(path)
+	}
+	if len(result) > 5 {
+		result = result[:5]
+	}
+	return result
+}
+
 func (s *Services) ensureUser(ctx context.Context, openID, userName string) (*model.User, error) {
 	return s.Store.EnsureUser(ctx, openID, userName)
 }
@@ -132,7 +181,7 @@ func (s *Services) IgnoreDraft(ctx context.Context, openID, userName string, dra
 	if err != nil {
 		return err
 	}
-	return s.Store.UpdateDraftStatus(ctx, user.ID, draftID, "IGNORED")
+	return s.Store.UpdateDraftStatus(ctx, user.ID, draftID, "REJECTED")
 }
 
 func (s *Services) LaterDraft(ctx context.Context, openID, userName string, draftID int64) error {
@@ -140,7 +189,7 @@ func (s *Services) LaterDraft(ctx context.Context, openID, userName string, draf
 	if err != nil {
 		return err
 	}
-	return s.Store.UpdateDraftStatus(ctx, user.ID, draftID, "LATER")
+	return s.Store.UpdateDraftStatus(ctx, user.ID, draftID, "DEFERRED")
 }
 
 func (s *Services) ListLater(ctx context.Context, openID, userName string) ([]model.Draft, error) {
@@ -374,11 +423,25 @@ func (s *Services) ListPendingDrafts(ctx context.Context, openID, userName, chat
 }
 
 func (s *Services) ExpirePendingDrafts(ctx context.Context, limit int) (map[string]any, error) {
-	ids, err := s.Store.ExpirePendingDrafts(ctx, limit)
+	drafts, err := s.Store.ExpirePendingDrafts(ctx, limit)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"expiredCount": len(ids), "draftIds": ids}, nil
+	if s.Messenger != nil && s.Messenger.Enabled() {
+		for _, d := range drafts {
+			if strings.TrimSpace(d.CardMessageID) == "" {
+				continue
+			}
+			md := fmt.Sprintf("# 草稿 #%d\n- 标题：%s\n- 已超时自动失效", d.ID, d.Title)
+			card := feishu.BuildResolvedCardJSON("知识沉淀助手", md, "expired")
+			if err := s.Messenger.PatchCard(ctx, d.CardMessageID, card); err != nil {
+				log.Printf("[expired_card_update_failed] draft_id=%d card_message_id=%s error=%v", d.ID, d.CardMessageID, err)
+			} else {
+				log.Printf("[expired_card_update_success] draft_id=%d card_message_id=%s", d.ID, d.CardMessageID)
+			}
+		}
+	}
+	return map[string]any{"expiredCount": len(drafts)}, nil
 }
 
 func (s *Services) RemindPendingDrafts(ctx context.Context, before time.Duration, limit int) (int, error) {
@@ -388,6 +451,18 @@ func (s *Services) RemindPendingDrafts(ctx context.Context, before time.Duration
 	}
 	count := 0
 	for _, draft := range drafts {
+		if s.Messenger != nil && s.Messenger.Enabled() {
+			reminderText := fmt.Sprintf("你有一条待确认的知识草稿 #%d：%s，即将到期自动失效。请尽快确认保存或丢弃。", draft.ID, draft.Title)
+			sent := false
+			if strings.TrimSpace(draft.SourceMessageID) != "" {
+				if err := s.Messenger.ReplyText(ctx, draft.SourceMessageID, reminderText); err == nil {
+					sent = true
+				}
+			}
+			if !sent && strings.TrimSpace(draft.ChatID) != "" {
+				_, _ = s.Messenger.SendText(ctx, "chat_id", draft.ChatID, reminderText)
+			}
+		}
 		if err := s.Store.MarkDraftReminded(ctx, draft.ID); err == nil {
 			count++
 		}

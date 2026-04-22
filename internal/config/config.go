@@ -17,6 +17,7 @@ type Config struct {
 	FeishuVerificationToken   string
 	FeishuEncryptKey          string
 	FeishuDocBaseURL          string
+	FeishuWSEnabled           bool
 	LLMEnabled                bool
 	LLMBaseURL                string
 	LLMAPIKey                 string
@@ -81,6 +82,10 @@ func Load() (Config, error) {
 		return cfg, err
 	}
 	cfg.AutoMigrate, err = getEnvBool("AUTO_MIGRATE", true)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.FeishuWSEnabled, err = getEnvBool("FEISHU_WS_ENABLED", false)
 	if err != nil {
 		return cfg, err
 	}
