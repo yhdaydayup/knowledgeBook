@@ -13,9 +13,9 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档名称 | knowledgeBook 交互层迭代技术方案（知识沉淀助手 v2） |
-| 迭代版本号 | v2.0-draft |
-| 更新时间 | 2026-03-31 |
-| 当前状态 | 讨论中，未进入编码 |
+| 迭代版本号 | v2.0 |
+| 更新时间 | 2026-04-22 |
+| 当前状态 | 已完成，归档 |
 | 关联文档 | `knowledgeBook/log/prd_delta_llm_interaction_v1.md`、`knowledgeBook/log/tech_doc_delta_llm_interaction_v1.md`、`knowledgeBook/log/iteration_impl_detail_llm_interaction_v1.md` |
 | 当前用途 | 作为本轮唯一迭代文档持续维护，承接讨论、收敛、实现与发版前校对 |
 
@@ -856,3 +856,50 @@ TTL + reminder worker：补 reminder 与 expire 批处理
 - create/search/similarity 回归验证
 - approve/reject/change-category 主链路验证
 - 飞书文本与卡片交互验证
+
+---
+
+## 十八、V2 迭代完成总结
+
+> 本轮迭代已于 2026-04-22 完成全部功能实现与部署验证，文档归档。
+
+### 已完成 Gap 清单
+
+| # | Gap | 状态 |
+|---|---|---|
+| 1 | approve/reject/change_category 自然语言意图 + LLM context-aware intent parsing | 已完成 |
+| 2 | 待确认草稿上下文：user+chat 范围 pending draft 解析、多条澄清 | 已完成 |
+| 3 | 草稿 TTL / 过期 / 提醒机制（1h TTL, 15min reminder, 30s worker tick） | 已完成 |
+| 4 | 飞书卡片确认交互闭环：confirm/reject/change_category 按钮 + PatchCard 状态更新 | 已完成 |
+| 5 | reply / quote / message context 感知 + 引用命中草稿 | 已完成 |
+| 6 | 统一 embedded MCP server 补齐 5 个新 tools | 已完成 |
+| 7 | 候选分类推荐（LLM hint + 关键词规则 + 用户常用路径） | 已完成 |
+
+### 本轮额外完成
+
+| 项目 | 说明 |
+|---|---|
+| 飞书 WebSocket 长连接迁移 | HTTP 回调 → WS 长连接，解决无公网 IP 问题；vendor patch SDK MessageTypeCard 支持 |
+| 卡片过期自动更新 | 草稿过期时自动 PatchCard 为"已过期失效"样式；点击已过期卡片也触发更新 |
+| vendor 构建模式 | Dockerfile 改为 COPY vendor + go build -mod=vendor，解决 Docker 中依赖下载问题 |
+
+### 关键文件变更
+
+| 文件 | 改动说明 |
+|---|---|
+| `go.mod` / `go.sum` | 新增 larksuite/oapi-sdk-go/v3 + 传递依赖 |
+| `internal/api/handlers.go` | 提取 processMessageEvent/processCardAction 共享逻辑；卡片过期时也更新样式 |
+| `internal/api/ws_handlers.go` | **新增** WebSocket 事件/卡片回调适配层 |
+| `internal/api/mcp.go` | MCP tool 注册调整 |
+| `internal/feishu/wsconn.go` | **新增** WSClient + SDK 事件→领域类型适配 |
+| `internal/feishu/messenger.go` | 新增 BuildDraftCardJSON / BuildResolvedCardJSON / PatchCard；支持 expired 状态 |
+| `internal/config/config.go` | 新增 FeishuWSEnabled 配置项 |
+| `internal/repository/store.go` | 新增 ExpiredDraftInfo / CountPendingDraftsByChat / ListTopCategoryPaths 等 |
+| `internal/service/conversation_service.go` | LLM context-aware intent、候选分类推荐、ResolvePendingDraftContext 增强 |
+| `internal/service/llm_tasks.go` | 新增 parseIntentWithContext + ConversationContext |
+| `internal/service/services.go` | ExpirePendingDrafts 自动 PatchCard；RemindPendingDrafts 逻辑 |
+| `cmd/app-server/main.go` | 条件启动 WS 长连接客户端 |
+| `cmd/app-worker/main.go` | worker tick 间隔调整 |
+| `deploy/Dockerfile.server` / `Dockerfile.worker` | vendor 构建模式 |
+| `deploy/.env` | 新增 FEISHU_WS_ENABLED=true |
+| `vendor/` | 新增 oapi-sdk-go/v3 + gorilla/websocket + gogo/protobuf；SDK WS client.go 补丁 |

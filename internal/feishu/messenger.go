@@ -65,7 +65,76 @@ func (m *Messenger) ReplyText(ctx context.Context, messageID, text string) error
 	return nil
 }
 
-func (m *Messenger) ReplyCard(ctx context.Context, messageID, cardJSON string) error {
+func (m *Messenger) ReplyCard(ctx context.Context, messageID, cardJSON string) (string, error) {
+	if !m.Enabled() {
+		return "", fmt.Errorf("feishu messenger not configured")
+	}
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return "", fmt.Errorf("message_id is required")
+	}
+	token, err := m.fetchTenantAccessToken(ctx)
+	if err != nil {
+		return "", err
+	}
+	body := map[string]string{
+		"msg_type": "interactive",
+		"content":  cardJSON,
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			MessageID string `json:"message_id"`
+		} `json:"data"`
+	}
+	url := fmt.Sprintf("https://open.feishu.cn/open-apis/im/v1/messages/%s/reply", messageID)
+	if err := m.postJSON(ctx, url, token, body, &resp); err != nil {
+		return "", err
+	}
+	if resp.Code != 0 {
+		return "", fmt.Errorf("reply card failed: %s", resp.Msg)
+	}
+	return resp.Data.MessageID, nil
+}
+
+// SendText sends a proactive text message to a chat (not a reply).
+func (m *Messenger) SendText(ctx context.Context, receiveIDType, receiveID, text string) (string, error) {
+	if !m.Enabled() {
+		return "", fmt.Errorf("feishu messenger not configured")
+	}
+	receiveID = strings.TrimSpace(receiveID)
+	if receiveID == "" {
+		return "", fmt.Errorf("receive_id is required")
+	}
+	token, err := m.fetchTenantAccessToken(ctx)
+	if err != nil {
+		return "", err
+	}
+	body := map[string]string{
+		"receive_id": receiveID,
+		"msg_type":   "text",
+		"content":    string(MustJSON(map[string]string{"text": text})),
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			MessageID string `json:"message_id"`
+		} `json:"data"`
+	}
+	url := fmt.Sprintf("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=%s", receiveIDType)
+	if err := m.postJSON(ctx, url, token, body, &resp); err != nil {
+		return "", err
+	}
+	if resp.Code != 0 {
+		return "", fmt.Errorf("send message failed: %s", resp.Msg)
+	}
+	return resp.Data.MessageID, nil
+}
+
+// PatchCard updates an already-sent card message with new content.
+func (m *Messenger) PatchCard(ctx context.Context, messageID, cardJSON string) error {
 	if !m.Enabled() {
 		return fmt.Errorf("feishu messenger not configured")
 	}
@@ -85,14 +154,34 @@ func (m *Messenger) ReplyCard(ctx context.Context, messageID, cardJSON string) e
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 	}
-	url := fmt.Sprintf("https://open.feishu.cn/open-apis/im/v1/messages/%s/reply", messageID)
-	if err := m.postJSON(ctx, url, token, body, &resp); err != nil {
+	url := fmt.Sprintf("https://open.feishu.cn/open-apis/im/v1/messages/%s", messageID)
+	if err := m.doJSON(ctx, http.MethodPatch, url, token, body, &resp); err != nil {
 		return err
 	}
 	if resp.Code != 0 {
-		return fmt.Errorf("reply card failed: %s", resp.Msg)
+		return fmt.Errorf("patch card failed: %s", resp.Msg)
 	}
 	return nil
+}
+
+// BuildResolvedCardJSON generates a card with resolved state (no action buttons).
+func BuildResolvedCardJSON(title, resolvedText, status string) string {
+	statusLabel := map[string]string{"confirm": "已确认保存", "reject": "已拒绝保存", "expired": "已过期失效"}[status]
+	if statusLabel == "" {
+		statusLabel = "已处理"
+	}
+	card := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{"width_mode": "fill"},
+		"header": map[string]any{
+			"title": map[string]any{"tag": "plain_text", "content": title},
+		},
+		"body": map[string]any{"elements": []map[string]any{
+			{"tag": "markdown", "content": resolvedText},
+			{"tag": "markdown", "content": fmt.Sprintf("**%s**", statusLabel)},
+		}},
+	}
+	return string(MustJSON(card))
 }
 
 func BuildDraftCardJSON(title, markdown string, actions []CardAction) string {
@@ -188,11 +277,15 @@ func (m *Messenger) fetchTenantAccessToken(ctx context.Context) (string, error) 
 }
 
 func (m *Messenger) postJSON(ctx context.Context, url, token string, reqBody interface{}, out interface{}) error {
+	return m.doJSON(ctx, http.MethodPost, url, token, reqBody, out)
+}
+
+func (m *Messenger) doJSON(ctx context.Context, method, url, token string, reqBody interface{}, out interface{}) error {
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}

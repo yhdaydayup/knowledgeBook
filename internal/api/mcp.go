@@ -108,7 +108,7 @@ func (h *Handler) callMCPTool(ctx stdctx.Context, call mcpToolCallRequest) (map[
 		}
 		return mcpStructuredResult(draft, "draft category updated"), nil
 	case "get_pending_draft_context":
-		result, err := h.Services.ResolvePendingDraftContext(ctx, stringArg(args, "openId"), stringArg(args, "userName"), stringArg(args, "chatId"), stringArg(args, "messageId"), stringArg(args, "replyToMessageId"), int64Arg(args, "draftId"))
+		result, err := h.Services.ResolvePendingDraftContext(ctx, stringArg(args, "openId"), stringArg(args, "userName"), stringArg(args, "chatId"), stringArg(args, "messageId"), stringArg(args, "replyToMessageId"), int64Arg(args, "draftId"), stringArg(args, "quotedText"))
 		if err != nil {
 			return nil, err
 		}

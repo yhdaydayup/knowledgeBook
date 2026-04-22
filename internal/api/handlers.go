@@ -285,72 +285,83 @@ func (h *Handler) FeishuEvents(ctx stdctx.Context, c *app.RequestContext) {
 	writeJSON(c, http.StatusOK, model.APIResponse{Code: 0, Message: "event accepted", Data: map[string]any{"handled": true, "messageId": msg.MessageID, "eventId": eventID}, RequestID: requestID(c)})
 	log.Printf("[feishu_event_acked] request_id=%s event_id=%s message_id=%s ack_duration_ms=%d", requestID(c), eventID, msg.MessageID, time.Since(start).Milliseconds())
 
-	go func(msg feishuEventMessage, eventID, requestID string) {
-		backgroundCtx, cancel := stdctx.WithTimeout(stdctx.Background(), 60*time.Second)
-		defer cancel()
-		runtimeCtx := map[string]any{"chat_id": msg.ChatID, "message_id": msg.MessageID, "reply_to_message_id": msg.ReplyToMessageID, "quoted_text": msg.QuotedText}
-		if idx := parseSelectionIndex(msg.Text); idx > 0 && msg.OpenID != "" && msg.ChatID != "" {
-			stateJSON, err := h.Redis.Get(backgroundCtx, pendingSelectionKey(msg.OpenID, msg.ChatID)).Result()
-			if err == nil && strings.TrimSpace(stateJSON) != "" {
-				var state pendingSelectionState
-				if err := json.Unmarshal([]byte(stateJSON), &state); err == nil && idx <= len(state.CandidateIDs) {
-					runtimeCtx["selected_action"] = state.Action
-					runtimeCtx["selected_draft_id"] = state.CandidateIDs[idx-1]
-					log.Printf("[feishu_pending_selection_resolved] request_id=%s event_id=%s message_id=%s selected_index=%d selected_draft_id=%d action=%s", requestID, eventID, msg.MessageID, idx, state.CandidateIDs[idx-1], state.Action)
-				}
+	go h.processMessageEvent(*msg, eventID, requestID(c))
+}
+
+// processMessageEvent handles a single Feishu message event. Shared by HTTP and WebSocket paths.
+// Caller is responsible for dedup and ACK.
+func (h *Handler) processMessageEvent(msg feishuEventMessage, eventID, traceID string) {
+	start := time.Now()
+	backgroundCtx, cancel := stdctx.WithTimeout(stdctx.Background(), 60*time.Second)
+	defer cancel()
+	runtimeCtx := map[string]any{"chat_id": msg.ChatID, "message_id": msg.MessageID, "reply_to_message_id": msg.ReplyToMessageID, "quoted_text": msg.QuotedText}
+	if idx := parseSelectionIndex(msg.Text); idx > 0 && msg.OpenID != "" && msg.ChatID != "" {
+		stateJSON, err := h.Redis.Get(backgroundCtx, pendingSelectionKey(msg.OpenID, msg.ChatID)).Result()
+		if err == nil && strings.TrimSpace(stateJSON) != "" {
+			var state pendingSelectionState
+			if err := json.Unmarshal([]byte(stateJSON), &state); err == nil && idx <= len(state.CandidateIDs) {
+				runtimeCtx["selected_action"] = state.Action
+				runtimeCtx["selected_draft_id"] = state.CandidateIDs[idx-1]
+				log.Printf("[feishu_pending_selection_resolved] trace_id=%s event_id=%s message_id=%s selected_index=%d selected_draft_id=%d action=%s", traceID, eventID, msg.MessageID, idx, state.CandidateIDs[idx-1], state.Action)
 			}
 		}
-		result, err := h.Services.ExecuteBotMessageWithContext(backgroundCtx, msg.OpenID, msg.UserName, msg.Text, runtimeCtx)
-		if err != nil {
-			log.Printf("[feishu_event_handle_failed] request_id=%s event_id=%s message_id=%s error=%v", requestID, eventID, msg.MessageID, err)
-			return
-		}
-		log.Printf("[conversation_result] request_id=%s event_id=%s message_id=%s intent=%s reply_len=%d card_present=%t duration_ms=%d", requestID, eventID, msg.MessageID, result.Command, len(result.Reply), strings.TrimSpace(result.CardMarkdown) != "", time.Since(start).Milliseconds())
-		if msg.OpenID != "" && msg.ChatID != "" {
-			selectionKey := pendingSelectionKey(msg.OpenID, msg.ChatID)
-			if state := extractPendingSelectionState(result.Data); state != nil {
-				if payload, err := json.Marshal(state); err == nil {
-					if err := h.Redis.Set(backgroundCtx, selectionKey, payload, 10*time.Minute).Err(); err != nil {
-						log.Printf("[feishu_pending_selection_store_failed] request_id=%s event_id=%s message_id=%s error=%v", requestID, eventID, msg.MessageID, err)
-					} else {
-						log.Printf("[feishu_pending_selection_stored] request_id=%s event_id=%s message_id=%s action=%s candidate_count=%d", requestID, eventID, msg.MessageID, state.Action, len(state.CandidateIDs))
-					}
-				}
-			} else {
-				_ = h.Redis.Del(backgroundCtx, selectionKey).Err()
-			}
-		}
-		if msg.MessageID == "" {
-			return
-		}
-		messenger := feishu.NewMessenger(h.Services.Cfg.FeishuAppID, h.Services.Cfg.FeishuAppSecret)
-		if !messenger.Enabled() {
-			log.Printf("[feishu_reply_skipped] request_id=%s event_id=%s message_id=%s reason=messenger_disabled", requestID, eventID, msg.MessageID)
-			return
-		}
-		draftID := extractDraftID(result.Data)
-		replyType := map[bool]string{true: "card", false: "text"}[strings.TrimSpace(result.CardMarkdown) != ""]
-		log.Printf("[feishu_reply_attempt] request_id=%s event_id=%s message_id=%s chat_id=%s reply_type=%s draft_id=%d", requestID, eventID, msg.MessageID, msg.ChatID, replyType, draftID)
-		if strings.TrimSpace(result.CardMarkdown) != "" {
-			cardJSON := feishu.BuildDraftCardJSON("知识沉淀助手", result.CardMarkdown, []feishu.CardAction{{Action: "confirm", DraftID: draftID, ChatID: msg.ChatID}, {Action: "reject", DraftID: draftID, ChatID: msg.ChatID}, {Action: "change_category", DraftID: draftID, ChatID: msg.ChatID}})
-			if err := messenger.ReplyCard(backgroundCtx, msg.MessageID, cardJSON); err != nil {
-				log.Printf("[feishu_reply_card_failed] request_id=%s event_id=%s message_id=%s draft_id=%d error=%v card_json=%s", requestID, eventID, msg.MessageID, draftID, err, cardJSON)
-				if err := messenger.ReplyText(backgroundCtx, msg.MessageID, result.Reply); err != nil {
-					log.Printf("[feishu_reply_text_fallback_failed] request_id=%s event_id=%s message_id=%s draft_id=%d error=%v", requestID, eventID, msg.MessageID, draftID, err)
+	}
+	result, err := h.Services.ExecuteBotMessageWithContext(backgroundCtx, msg.OpenID, msg.UserName, msg.Text, runtimeCtx)
+	if err != nil {
+		log.Printf("[feishu_event_handle_failed] trace_id=%s event_id=%s message_id=%s error=%v", traceID, eventID, msg.MessageID, err)
+		return
+	}
+	log.Printf("[conversation_result] trace_id=%s event_id=%s message_id=%s intent=%s reply_len=%d card_present=%t duration_ms=%d", traceID, eventID, msg.MessageID, result.Command, len(result.Reply), strings.TrimSpace(result.CardMarkdown) != "", time.Since(start).Milliseconds())
+	if msg.OpenID != "" && msg.ChatID != "" {
+		selectionKey := pendingSelectionKey(msg.OpenID, msg.ChatID)
+		if state := extractPendingSelectionState(result.Data); state != nil {
+			if payload, err := json.Marshal(state); err == nil {
+				if err := h.Redis.Set(backgroundCtx, selectionKey, payload, 10*time.Minute).Err(); err != nil {
+					log.Printf("[feishu_pending_selection_store_failed] trace_id=%s event_id=%s message_id=%s error=%v", traceID, eventID, msg.MessageID, err)
 				} else {
-					log.Printf("[feishu_reply_text_fallback_success] request_id=%s event_id=%s message_id=%s draft_id=%d", requestID, eventID, msg.MessageID, draftID)
+					log.Printf("[feishu_pending_selection_stored] trace_id=%s event_id=%s message_id=%s action=%s candidate_count=%d", traceID, eventID, msg.MessageID, state.Action, len(state.CandidateIDs))
 				}
-			} else {
-				log.Printf("[feishu_reply_card_success] request_id=%s event_id=%s message_id=%s draft_id=%d", requestID, eventID, msg.MessageID, draftID)
 			}
-			return
-		}
-		if err := messenger.ReplyText(backgroundCtx, msg.MessageID, result.Reply); err != nil {
-			log.Printf("[feishu_reply_text_failed] request_id=%s event_id=%s message_id=%s draft_id=%d error=%v", requestID, eventID, msg.MessageID, draftID, err)
 		} else {
-			log.Printf("[feishu_reply_text_success] request_id=%s event_id=%s message_id=%s draft_id=%d", requestID, eventID, msg.MessageID, draftID)
+			_ = h.Redis.Del(backgroundCtx, selectionKey).Err()
 		}
-	}(*msg, eventID, requestID(c))
+	}
+	if msg.MessageID == "" {
+		return
+	}
+	messenger := feishu.NewMessenger(h.Services.Cfg.FeishuAppID, h.Services.Cfg.FeishuAppSecret)
+	if !messenger.Enabled() {
+		log.Printf("[feishu_reply_skipped] trace_id=%s event_id=%s message_id=%s reason=messenger_disabled", traceID, eventID, msg.MessageID)
+		return
+	}
+	draftID := extractDraftID(result.Data)
+	replyType := map[bool]string{true: "card", false: "text"}[strings.TrimSpace(result.CardMarkdown) != ""]
+	log.Printf("[feishu_reply_attempt] trace_id=%s event_id=%s message_id=%s chat_id=%s reply_type=%s draft_id=%d", traceID, eventID, msg.MessageID, msg.ChatID, replyType, draftID)
+	if strings.TrimSpace(result.CardMarkdown) != "" {
+		cardJSON := feishu.BuildDraftCardJSON("知识沉淀助手", result.CardMarkdown, []feishu.CardAction{{Action: "confirm", DraftID: draftID, ChatID: msg.ChatID}, {Action: "reject", DraftID: draftID, ChatID: msg.ChatID}, {Action: "change_category", DraftID: draftID, ChatID: msg.ChatID}})
+		cardMsgID, err := messenger.ReplyCard(backgroundCtx, msg.MessageID, cardJSON)
+		if err != nil {
+			log.Printf("[feishu_reply_card_failed] trace_id=%s event_id=%s message_id=%s draft_id=%d error=%v card_json=%s", traceID, eventID, msg.MessageID, draftID, err, cardJSON)
+			if err := messenger.ReplyText(backgroundCtx, msg.MessageID, result.Reply); err != nil {
+				log.Printf("[feishu_reply_text_fallback_failed] trace_id=%s event_id=%s message_id=%s draft_id=%d error=%v", traceID, eventID, msg.MessageID, draftID, err)
+			} else {
+				log.Printf("[feishu_reply_text_fallback_success] trace_id=%s event_id=%s message_id=%s draft_id=%d", traceID, eventID, msg.MessageID, draftID)
+			}
+		} else {
+			log.Printf("[feishu_reply_card_success] trace_id=%s event_id=%s message_id=%s draft_id=%d card_message_id=%s", traceID, eventID, msg.MessageID, draftID, cardMsgID)
+			if draftID > 0 && strings.TrimSpace(cardMsgID) != "" {
+				if err := h.Services.Store.UpdateDraftCardMessageID(backgroundCtx, draftID, cardMsgID); err != nil {
+					log.Printf("[card_message_id_writeback_failed] trace_id=%s draft_id=%d card_message_id=%s error=%v", traceID, draftID, cardMsgID, err)
+				}
+			}
+		}
+		return
+	}
+	if err := messenger.ReplyText(backgroundCtx, msg.MessageID, result.Reply); err != nil {
+		log.Printf("[feishu_reply_text_failed] trace_id=%s event_id=%s message_id=%s draft_id=%d error=%v", traceID, eventID, msg.MessageID, draftID, err)
+	} else {
+		log.Printf("[feishu_reply_text_success] trace_id=%s event_id=%s message_id=%s draft_id=%d", traceID, eventID, msg.MessageID, draftID)
+	}
 }
 
 func extractDraftID(data interface{}) int64 {
@@ -429,8 +440,20 @@ func (h *Handler) FeishuCardCallback(ctx stdctx.Context, c *app.RequestContext) 
 	if fv, ok := actionMap["form_value"].(map[string]any); ok {
 		formValue = fv
 	}
+	openMessageID := ""
+	if omid, ok := payload["open_message_id"].(string); ok {
+		openMessageID = strings.TrimSpace(omid)
+	}
+	response := h.processCardAction(ctx, action, chatID, draftID, openID, userName, formValue, openMessageID)
+	c.JSON(http.StatusOK, response)
+}
+
+// processCardAction handles a single card interaction. Shared by HTTP and WebSocket paths.
+func (h *Handler) processCardAction(ctx stdctx.Context, action, chatID string, draftID int64, openID, userName string, formValue map[string]any, openMessageID string) map[string]any {
 	toastType := "info"
 	result := "暂不支持的卡片操作"
+	var cardMarkdownForUpdate string
+	resolvedAction := action
 	switch action {
 	case "confirm":
 		item, err := h.Services.ApproveDraft(ctx, openID, userName, draftID, "")
@@ -438,25 +461,33 @@ func (h *Handler) FeishuCardCallback(ctx stdctx.Context, c *app.RequestContext) 
 			if strings.Contains(err.Error(), "already resolved") {
 				toastType = "warning"
 				result = fmt.Sprintf("草稿 #%d 已处理，请刷新查看最新状态。", draftID)
+				cardMarkdownForUpdate = fmt.Sprintf("# 草稿 #%d\n- 已处理（重复操作）", draftID)
+				resolvedAction = "expired"
 				break
 			}
-			writeJSON(c, http.StatusInternalServerError, model.APIResponse{Code: 5000, Message: "confirm draft failed", Details: err.Error(), RequestID: requestID(c)})
-			return
+			toastType = "error"
+			result = fmt.Sprintf("确认草稿 #%d 失败：%s", draftID, err.Error())
+			break
 		}
 		toastType = "success"
 		result = fmt.Sprintf("已确认草稿 #%d，生成知识 #%d：%s", draftID, item.ID, item.Title)
+		cardMarkdownForUpdate = fmt.Sprintf("# 草稿 #%d\n- 标题：%s\n- 知识ID：#%d", draftID, item.Title, item.ID)
 	case "reject":
 		if err := h.Services.RejectDraft(ctx, openID, userName, draftID); err != nil {
 			if strings.Contains(err.Error(), "already resolved") {
 				toastType = "warning"
 				result = fmt.Sprintf("草稿 #%d 已处理，请刷新查看最新状态。", draftID)
+				cardMarkdownForUpdate = fmt.Sprintf("# 草稿 #%d\n- 已处理（重复操作）", draftID)
+				resolvedAction = "expired"
 				break
 			}
-			writeJSON(c, http.StatusInternalServerError, model.APIResponse{Code: 5000, Message: "reject draft failed", Details: err.Error(), RequestID: requestID(c)})
-			return
+			toastType = "error"
+			result = fmt.Sprintf("丢弃草稿 #%d 失败：%s", draftID, err.Error())
+			break
 		}
 		toastType = "success"
 		result = fmt.Sprintf("已丢弃草稿 #%d", draftID)
+		cardMarkdownForUpdate = fmt.Sprintf("# 草稿 #%d\n- 已丢弃", draftID)
 	case "change_category":
 		categoryPath := ""
 		for _, key := range []string{fmt.Sprintf("cat%d", draftID), "category_path"} {
@@ -477,15 +508,16 @@ func (h *Handler) FeishuCardCallback(ctx stdctx.Context, c *app.RequestContext) 
 				result = fmt.Sprintf("草稿 #%d 已处理，不能再修改分类。", draftID)
 				break
 			}
-			writeJSON(c, http.StatusInternalServerError, model.APIResponse{Code: 5000, Message: "change category failed", Details: err.Error(), RequestID: requestID(c)})
-			return
+			toastType = "error"
+			result = fmt.Sprintf("修改草稿 #%d 分类失败：%s", draftID, err.Error())
+			break
 		}
 		toastType = "success"
 		result = fmt.Sprintf("已将草稿 #%d 的分类改为：%s", draftID, updatedDraft.RecommendedCategoryPath)
 	default:
 		result = "暂不支持的卡片操作"
 	}
-	c.JSON(http.StatusOK, map[string]any{
+	response := map[string]any{
 		"toast": map[string]any{
 			"type":    toastType,
 			"content": result,
@@ -496,7 +528,20 @@ func (h *Handler) FeishuCardCallback(ctx stdctx.Context, c *app.RequestContext) 
 			"chatId":  chatID,
 			"result":  result,
 		},
-	})
+	}
+	if openMessageID != "" && cardMarkdownForUpdate != "" && h.Services.Messenger != nil && h.Services.Messenger.Enabled() {
+		go func(msgID, markdown, act string) {
+			bgCtx, cancel := stdctx.WithTimeout(stdctx.Background(), 10*time.Second)
+			defer cancel()
+			resolvedCard := feishu.BuildResolvedCardJSON("知识沉淀助手", markdown, act)
+			if err := h.Services.Messenger.PatchCard(bgCtx, msgID, resolvedCard); err != nil {
+				log.Printf("[card_update_failed] message_id=%s action=%s error=%v", msgID, act, err)
+			} else {
+				log.Printf("[card_update_success] message_id=%s action=%s", msgID, act)
+			}
+		}(openMessageID, cardMarkdownForUpdate, resolvedAction)
+	}
+	return response
 }
 
 func (h *Handler) CreateKnowledge(ctx stdctx.Context, c *app.RequestContext) {

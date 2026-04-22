@@ -58,11 +58,13 @@ func (s *Services) CreateDraft(ctx context.Context, req CreateKnowledgeRequest) 
 		llmConfidence = conf
 	}
 	expiresAt := time.Now().Add(time.Hour)
+	topPaths, _ := s.Store.ListTopCategoryPaths(ctx, user.ID, 5)
+	candidates := recommendCandidateCategories(req.Content, extracted.CategoryHint, topPaths)
 	interactionContext := map[string]interface{}{
-		"quoted_text":        strings.TrimSpace(req.QuotedText),
-		"candidate_categories": []string{},
+		"quoted_text":           strings.TrimSpace(req.QuotedText),
+		"candidate_categories":  candidates,
 		"similarity_candidates": []interface{}{},
-		"source_channel":     "feishu",
+		"source_channel":        "feishu",
 	}
 	return s.Store.CreateStructuredDraft(ctx, repository.CreateDraftParams{
 		UserID:                   user.ID,
@@ -173,14 +175,28 @@ func (s *Services) HandleConversationWithContext(ctx context.Context, openID, us
 	if selectedDraftID > 0 && isDraftSelectionReply(text) {
 		text = selectionActionText(selectedAction)
 	}
-	intent := s.parseIntentWithFallback(ctx, text)
-	if intent.NeedsClarification {
-		return &model.BotConversationResult{Intent: intent.Intent, Reply: "我还没完全理解你的意思。你可以直接告诉我：想记录什么、想查什么、是否确认保存，或者要改到哪个分类。我也能继续承接上一条草稿操作。", Data: intent}, nil
-	}
 	chatID := contextString(runtimeCtx, "chat_id")
 	messageID := contextString(runtimeCtx, "message_id")
 	replyToMessageID := contextString(runtimeCtx, "reply_to_message_id")
 	quotedText := contextString(runtimeCtx, "quoted_text")
+	var convCtx *ConversationContext
+	if s.llmAvailable() && strings.TrimSpace(chatID) != "" {
+		user, _ := s.ensureUser(ctx, openID, userName)
+		if user != nil {
+			count, _ := s.Store.CountPendingDraftsByChat(ctx, user.ID, chatID)
+			var lastTitle string
+			if count > 0 {
+				if drafts, err := s.Store.ListPendingDraftsByChat(ctx, user.ID, chatID, 1); err == nil && len(drafts) > 0 {
+					lastTitle = drafts[0].Title
+				}
+			}
+			convCtx = &ConversationContext{PendingDraftCount: count, LastDraftTitle: lastTitle, ChatID: chatID}
+		}
+	}
+	intent := s.parseIntentWithContext(ctx, text, convCtx)
+	if intent.NeedsClarification {
+		return &model.BotConversationResult{Intent: intent.Intent, Reply: "我还没完全理解你的意思。你可以直接告诉我：想记录什么、想查什么、是否确认保存，或者要改到哪个分类。我也能继续承接上一条草稿操作。", Data: intent}, nil
+	}
 	switch intent.Intent {
 	case "create_knowledge":
 		draft, err := s.CreateDraft(ctx, CreateKnowledgeRequest{
@@ -205,7 +221,7 @@ func (s *Services) HandleConversationWithContext(ctx context.Context, openID, us
 		data := map[string]any{"intent": intent, "draft": draft, "similarities": records}
 		return &model.BotConversationResult{Intent: intent.Intent, Reply: composeCreateReply(draft, records), CardMarkdown: composeDraftCard(draft, records), Data: data}, nil
 	case "approve_pending_draft":
-		resolved, err := s.ResolvePendingDraftContext(ctx, openID, userName, chatID, messageID, replyToMessageID, selectedDraftID)
+		resolved, err := s.ResolvePendingDraftContext(ctx, openID, userName, chatID, messageID, replyToMessageID, selectedDraftID, quotedText)
 		if err != nil {
 			return nil, err
 		}
@@ -218,7 +234,7 @@ func (s *Services) HandleConversationWithContext(ctx context.Context, openID, us
 		}
 		return &model.BotConversationResult{Intent: intent.Intent, Reply: fmt.Sprintf("已确认草稿 #%d，生成知识 #%d：%s", resolved.Draft.ID, item.ID, item.Title), Data: map[string]any{"intent": intent, "draft": resolved.Draft, "item": item}}, nil
 	case "reject_pending_draft":
-		resolved, err := s.ResolvePendingDraftContext(ctx, openID, userName, chatID, messageID, replyToMessageID, selectedDraftID)
+		resolved, err := s.ResolvePendingDraftContext(ctx, openID, userName, chatID, messageID, replyToMessageID, selectedDraftID, quotedText)
 		if err != nil {
 			return nil, err
 		}
@@ -230,7 +246,7 @@ func (s *Services) HandleConversationWithContext(ctx context.Context, openID, us
 		}
 		return &model.BotConversationResult{Intent: intent.Intent, Reply: fmt.Sprintf("已丢弃草稿 #%d：%s", resolved.Draft.ID, resolved.Draft.Title), Data: map[string]any{"intent": intent, "draft": resolved.Draft}}, nil
 	case "change_pending_draft_category":
-		resolved, err := s.ResolvePendingDraftContext(ctx, openID, userName, chatID, messageID, replyToMessageID, selectedDraftID)
+		resolved, err := s.ResolvePendingDraftContext(ctx, openID, userName, chatID, messageID, replyToMessageID, selectedDraftID, quotedText)
 		if err != nil {
 			return nil, err
 		}
@@ -655,6 +671,21 @@ func composeDraftCard(draft *model.Draft, records []model.SimilarityRecord) stri
 	if draft.RecommendedCategoryPath != "" {
 		lines = append(lines, fmt.Sprintf("- 推荐分类：%s", draft.RecommendedCategoryPath))
 	}
+	if draft.InteractionContext != nil {
+		if raw, ok := draft.InteractionContext["candidate_categories"]; ok {
+			if arr, ok := raw.([]interface{}); ok && len(arr) > 0 {
+				var paths []string
+				for _, v := range arr {
+					if s, ok := v.(string); ok && s != "" {
+						paths = append(paths, s)
+					}
+				}
+				if len(paths) > 0 {
+					lines = append(lines, fmt.Sprintf("- 候选分类：%s", strings.Join(paths, " | ")))
+				}
+			}
+		}
+	}
 	if len(records) > 0 {
 		lines = append(lines, "- 相似知识：")
 		for i, item := range records {
@@ -726,7 +757,7 @@ type PendingDraftContext struct {
 	ClarifyReply       string         `json:"clarifyReply,omitempty"`
 }
 
-func (s *Services) ResolvePendingDraftContext(ctx context.Context, openID, userName, chatID, messageID, replyToMessageID string, selectedDraftID int64) (*PendingDraftContext, error) {
+func (s *Services) ResolvePendingDraftContext(ctx context.Context, openID, userName, chatID, messageID, replyToMessageID string, selectedDraftID int64, quotedText string) (*PendingDraftContext, error) {
 	user, err := s.ensureUser(ctx, openID, userName)
 	if err != nil {
 		return nil, err
@@ -744,6 +775,20 @@ func (s *Services) ResolvePendingDraftContext(ctx context.Context, openID, userN
 		draft, err := s.Store.GetPendingDraftBySourceMessage(ctx, user.ID, candidateMessageID)
 		if err == nil {
 			return &PendingDraftContext{Draft: draft, PendingCount: 1, MatchMode: "message_binding", NeedsClarification: false}, nil
+		}
+	}
+	quotedText = strings.TrimSpace(quotedText)
+	if quotedText != "" && strings.TrimSpace(chatID) != "" {
+		drafts, err := s.Store.ListPendingDraftsByChat(ctx, user.ID, chatID, 10)
+		if err == nil {
+			normalizedQuote := strings.ToLower(quotedText)
+			for i, draft := range drafts {
+				normalizedTitle := strings.ToLower(draft.Title)
+				normalizedContent := strings.ToLower(draft.RawContent)
+				if strings.Contains(normalizedContent, normalizedQuote) || strings.Contains(normalizedTitle, normalizedQuote) || ngramSimilarity(normalizedQuote, normalizedTitle) > 0.5 {
+					return &PendingDraftContext{Draft: &drafts[i], PendingCount: 1, MatchMode: "quoted_text_binding", NeedsClarification: false}, nil
+				}
+			}
 		}
 	}
 	if strings.TrimSpace(chatID) == "" {

@@ -9,6 +9,7 @@ import (
 	"knowledgebook/internal/api"
 	"knowledgebook/internal/config"
 	"knowledgebook/internal/database"
+	"knowledgebook/internal/feishu"
 	"knowledgebook/internal/llm"
 	"knowledgebook/internal/repository"
 	"knowledgebook/internal/service"
@@ -41,9 +42,22 @@ func main() {
 	}
 	store := repository.New(pool)
 	llmClient := llm.NewHTTPClient(cfg)
-	svc := service.New(store, cfg, runtimeAgent, llmClient)
+	messenger := feishu.NewMessenger(cfg.FeishuAppID, cfg.FeishuAppSecret)
+	svc := service.New(store, cfg, runtimeAgent, llmClient, messenger)
 	handler := api.NewHandler(svc, pool, redisClient)
 	server := api.NewServer(handler, cfg.AppPort)
+	if cfg.FeishuWSEnabled {
+		wsClient := feishu.NewWSClient(cfg.FeishuAppID, cfg.FeishuAppSecret,
+			handler.OnWSMessageEvent,
+			handler.OnWSCardAction,
+		)
+		go func() {
+			log.Printf("feishu websocket long connection starting...")
+			if err := wsClient.Start(context.Background()); err != nil {
+				log.Fatalf("feishu websocket client failed: %v", err)
+			}
+		}()
+	}
 	log.Printf("app-server listening on :%s", cfg.AppPort)
 	server.Spin()
 }

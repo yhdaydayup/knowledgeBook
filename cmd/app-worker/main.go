@@ -9,6 +9,7 @@ import (
 	"knowledgebook/internal/agent"
 	"knowledgebook/internal/config"
 	"knowledgebook/internal/database"
+	"knowledgebook/internal/feishu"
 	"knowledgebook/internal/llm"
 	"knowledgebook/internal/repository"
 	"knowledgebook/internal/service"
@@ -36,7 +37,8 @@ func main() {
 	}
 	store := repository.New(pool)
 	llmClient := llm.NewHTTPClient(cfg)
-	svc := service.New(store, cfg, runtimeAgent, llmClient)
+	messenger := feishu.NewMessenger(cfg.FeishuAppID, cfg.FeishuAppSecret)
+	svc := service.New(store, cfg, runtimeAgent, llmClient, messenger)
 	log.Printf("app-worker started")
 	ticker := time.NewTicker(service.SleepUntilNextTick())
 	defer ticker.Stop()

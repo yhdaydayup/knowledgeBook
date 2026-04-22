@@ -30,6 +30,57 @@ type llmSimilarityJudgement struct {
 	SuggestedAction string  `json:"suggested_action"`
 }
 
+// ConversationContext provides enriched context for LLM intent parsing.
+type ConversationContext struct {
+	PendingDraftCount int
+	LastDraftTitle    string
+	ChatID            string
+}
+
+// parseIntentWithContext enriches the LLM prompt with conversation state before parsing.
+func (s *Services) parseIntentWithContext(ctx context.Context, text string, convCtx *ConversationContext) model.IntentResult {
+	if convCtx == nil || !s.llmAvailable() {
+		return s.parseIntentWithFallback(ctx, text)
+	}
+	fallback := normalizeIntentResult(parseIntent(text), text)
+	var contextHint string
+	if convCtx.PendingDraftCount > 0 {
+		contextHint = fmt.Sprintf("会话上下文：当前会话有 %d 条待确认草稿。", convCtx.PendingDraftCount)
+		if convCtx.LastDraftTitle != "" {
+			contextHint += fmt.Sprintf("最近一条草稿标题是\u201c%s\u201d。", convCtx.LastDraftTitle)
+		}
+		contextHint += "\n\n"
+	}
+	userPrompt := fmt.Sprintf("%s请分析下面的用户输入，并按 schema 返回。\n\n用户输入：%s", contextHint, text)
+	payload, err := s.LLM.GenerateJSON(ctx, llm.GenerateJSONRequest{
+		TaskName:       "intent_parser",
+		SystemPrompt:   s.Agent.Prompt("intent"),
+		UserPrompt:     userPrompt,
+		Temperature:    0,
+		MaxTokens:      500,
+		ResponseSchema: s.Agent.Schema("intent"),
+	})
+	if err != nil {
+		return handleLLMError(s, "intent_parser_ctx", err, fallback)
+	}
+	var result model.IntentResult
+	if err := json.Unmarshal(payload, &result); err != nil {
+		return handleLLMError(s, "intent_parser_ctx_decode", err, fallback)
+	}
+	if !isValidIntent(result.Intent) {
+		return handleLLMError(s, "intent_parser_ctx_validate", fmt.Errorf("invalid intent: %s", result.Intent), fallback)
+	}
+	if result.Confidence < 0 || result.Confidence > 1 {
+		return handleLLMError(s, "intent_parser_ctx_validate", fmt.Errorf("invalid confidence"), fallback)
+	}
+	result = normalizeIntentResult(result, text)
+	if shouldPreferIntentFallback(result, fallback) {
+		log.Printf("llm task intent_parser_ctx fallback_preferred: llm_intent=%s llm_confidence=%.2f fallback_intent=%s fallback_confidence=%.2f", result.Intent, result.Confidence, fallback.Intent, fallback.Confidence)
+		return fallback
+	}
+	return result
+}
+
 // parseIntentWithFallback prefers the external LLM but safely falls back to rule-based intent parsing.
 func (s *Services) parseIntentWithFallback(ctx context.Context, text string) model.IntentResult {
 	fallback := normalizeIntentResult(parseIntent(text), text)
