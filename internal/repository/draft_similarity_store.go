@@ -148,7 +148,14 @@ WHERE id=$1 AND user_id=$2
 func (s *Store) SearchKnowledgeEvidence(ctx context.Context, userID int64, query, category string, limit int) ([]model.SearchResult, error) {
 	query = strings.TrimSpace(query)
 	category = normalizePath(category)
-	like := "%" + query + "%"
+	terms := strings.Fields(query)
+	if len(terms) == 0 {
+		terms = []string{query}
+	}
+	likeTerms := make([]string, len(terms))
+	for i, t := range terms {
+		likeTerms[i] = "%" + t + "%"
+	}
 	rows, err := s.DB.Query(ctx, `
 WITH ranked AS (
   SELECT id, title, COALESCE(summary,'') AS summary, category_path, updated_at, COALESCE(doc_anchor_link,'') AS doc_anchor_link,
@@ -160,17 +167,17 @@ WITH ranked AS (
     AND (
       $4 = ''
       OR search_vector @@ plainto_tsquery('simple', $4)
-      OR title ILIKE $5
-      OR summary ILIKE $5
-      OR content_markdown ILIKE $5
-      OR array_to_string(tags, ',') ILIKE $5
+      OR title ILIKE ANY($5)
+      OR summary ILIKE ANY($5)
+      OR content_markdown ILIKE ANY($5)
+      OR array_to_string(tags, ',') ILIKE ANY($5)
     )
 )
 SELECT id, title, summary, category_path, updated_at, doc_anchor_link
 FROM ranked
 ORDER BY rank DESC, updated_at DESC
 LIMIT $6
-`, userID, category, category+"%", query, like, limit)
+`, userID, category, category+"%", query, likeTerms, limit)
 	if err != nil {
 		return nil, err
 	}

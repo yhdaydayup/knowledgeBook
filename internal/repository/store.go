@@ -150,7 +150,7 @@ func (s *Store) GetDraft(ctx context.Context, userID, draftID int64) (*model.Dra
 }
 
 func (s *Store) UpdateDraftStatus(ctx context.Context, userID, draftID int64, status string) error {
-	cmd, err := s.DB.Exec(ctx, `UPDATE knowledge_drafts SET status=$1, reviewed_at=NOW(), resolved_at=NOW(), updated_at=NOW() WHERE id=$2 AND user_id=$3`, status, draftID, userID)
+	cmd, err := s.DB.Exec(ctx, `UPDATE knowledge_drafts SET status=$1, reviewed_at=NOW(), resolved_at=NOW(), updated_at=NOW() WHERE id=$2 AND user_id=$3 AND status='PENDING_CONFIRMATION'`, status, draftID, userID)
 	if err != nil {
 		return err
 	}
@@ -324,6 +324,8 @@ func (s *Store) CountPendingDraftsByChat(ctx context.Context, userID int64, chat
 type ExpiredDraftInfo struct {
 	ID            int64
 	Title         string
+	Summary       string
+	Category      string
 	CardMessageID string
 }
 
@@ -340,7 +342,7 @@ WHERE id IN (
   ORDER BY expires_at ASC
   LIMIT $1
 )
-RETURNING id, COALESCE(title,''), COALESCE(card_message_id,'')
+RETURNING id, COALESCE(title,''), COALESCE(normalized_summary,''), COALESCE(recommended_category_path,''), COALESCE(card_message_id,'')
 `, limit)
 	if err != nil {
 		return nil, err
@@ -349,7 +351,7 @@ RETURNING id, COALESCE(title,''), COALESCE(card_message_id,'')
 	var results []ExpiredDraftInfo
 	for rows.Next() {
 		var info ExpiredDraftInfo
-		if err := rows.Scan(&info.ID, &info.Title, &info.CardMessageID); err != nil {
+		if err := rows.Scan(&info.ID, &info.Title, &info.Summary, &info.Category, &info.CardMessageID); err != nil {
 			return nil, err
 		}
 		results = append(results, info)
@@ -553,7 +555,14 @@ func (s *Store) RestoreKnowledge(ctx context.Context, userID, knowledgeID int64)
 func (s *Store) SearchKnowledge(ctx context.Context, userID int64, query, category string) ([]model.SearchResult, string, error) {
 	query = strings.TrimSpace(query)
 	category = normalizePath(category)
-	like := "%" + query + "%"
+	terms := strings.Fields(query)
+	if len(terms) == 0 {
+		terms = []string{query}
+	}
+	likeTerms := make([]string, len(terms))
+	for i, t := range terms {
+		likeTerms[i] = "%" + t + "%"
+	}
 	rows, err := s.DB.Query(ctx, `
 WITH ranked AS (
 	SELECT id, title, category_path, updated_at, COALESCE(doc_anchor_link,'') AS doc_anchor_link,
@@ -565,17 +574,17 @@ WITH ranked AS (
 	  AND (
 		$4 = ''
 		OR search_vector @@ plainto_tsquery('simple', $4)
-		OR title ILIKE $5
-		OR summary ILIKE $5
-		OR content_markdown ILIKE $5
-		OR array_to_string(tags, ',') ILIKE $5
+		OR title ILIKE ANY($5)
+		OR summary ILIKE ANY($5)
+		OR content_markdown ILIKE ANY($5)
+		OR array_to_string(tags, ',') ILIKE ANY($5)
 	  )
 )
 SELECT id, title, category_path, updated_at, doc_anchor_link
 FROM ranked
 ORDER BY rank DESC, updated_at DESC
 LIMIT 10
-`, userID, category, category+"%", query, like)
+`, userID, category, category+"%", query, likeTerms)
 	if err != nil {
 		return nil, "", err
 	}

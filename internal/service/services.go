@@ -9,6 +9,7 @@ import (
 
 	"knowledgebook/internal/agent"
 	"knowledgebook/internal/config"
+	"knowledgebook/internal/conversation"
 	"knowledgebook/internal/feishu"
 	"knowledgebook/internal/llm"
 	"knowledgebook/internal/model"
@@ -22,6 +23,7 @@ type Services struct {
 	Agent     *agent.Runtime
 	LLM       llm.Client
 	Messenger *feishu.Messenger
+	ConvAgent *conversation.Agent
 }
 
 // New constructs the service layer with repository access, runtime prompts and optional LLM support.
@@ -168,6 +170,9 @@ func (s *Services) ApproveDraft(ctx context.Context, openID, userName string, dr
 		return nil, err
 	}
 	if !strings.EqualFold(draft.Status, "PENDING_CONFIRMATION") {
+		return nil, fmt.Errorf("draft already resolved")
+	}
+	if draft.ExpiresAt != nil && time.Now().After(*draft.ExpiresAt) {
 		return nil, fmt.Errorf("draft already resolved")
 	}
 	if categoryPath == "" {
@@ -432,7 +437,18 @@ func (s *Services) ExpirePendingDrafts(ctx context.Context, limit int) (map[stri
 			if strings.TrimSpace(d.CardMessageID) == "" {
 				continue
 			}
-			md := fmt.Sprintf("# 草稿 #%d\n- 标题：%s\n- 已超时自动失效", d.ID, d.Title)
+			md := fmt.Sprintf("# %s", d.Title)
+			if d.Title == "" {
+				md = fmt.Sprintf("# 草稿 #%d", d.ID)
+			}
+			md += fmt.Sprintf("\n- 草稿ID：#%d", d.ID)
+			if d.Summary != "" {
+				md += fmt.Sprintf("\n- 摘要：%s", d.Summary)
+			}
+			if d.Category != "" {
+				md += fmt.Sprintf("\n- 分类：%s", d.Category)
+			}
+			md += "\n- 已超时自动失效"
 			card := feishu.BuildResolvedCardJSON("知识沉淀助手", md, "expired")
 			if err := s.Messenger.PatchCard(ctx, d.CardMessageID, card); err != nil {
 				log.Printf("[expired_card_update_failed] draft_id=%d card_message_id=%s error=%v", d.ID, d.CardMessageID, err)

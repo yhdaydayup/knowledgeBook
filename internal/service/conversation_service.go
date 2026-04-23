@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"knowledgebook/internal/conversation"
 	"knowledgebook/internal/model"
 	"knowledgebook/internal/repository"
 )
@@ -169,6 +171,36 @@ func (s *Services) HandleConversation(ctx context.Context, openID, userName, tex
 }
 
 func (s *Services) HandleConversationWithContext(ctx context.Context, openID, userName, text string, runtimeCtx map[string]any) (*model.BotConversationResult, error) {
+	text = strings.TrimSpace(text)
+
+	// Try agent mode if available
+	if s.ConvAgent != nil && s.llmAvailable() {
+		session := conversation.SessionContext{
+			OpenID:           openID,
+			UserName:         userName,
+			ChatID:           contextString(runtimeCtx, "chat_id"),
+			MessageID:        contextString(runtimeCtx, "message_id"),
+			ReplyToMessageID: contextString(runtimeCtx, "reply_to_message_id"),
+			QuotedText:       contextString(runtimeCtx, "quoted_text"),
+		}
+		result, err := s.ConvAgent.Run(ctx, session, text)
+		if err == nil {
+			return &model.BotConversationResult{
+				Intent:       "agent",
+				Reply:        result.Reply,
+				CardMarkdown: result.CardMarkdown,
+				Data:         result.Data,
+			}, nil
+		}
+		// Agent failed — fall through to V2 dispatch
+		log.Printf("[agent_fallback] agent.Run failed, falling back to v2 dispatch: %v", err)
+	}
+
+	return s.handleConversationV2(ctx, openID, userName, text, runtimeCtx)
+}
+
+// handleConversationV2 is the original V2 switch-case dispatch, kept as fallback.
+func (s *Services) handleConversationV2(ctx context.Context, openID, userName, text string, runtimeCtx map[string]any) (*model.BotConversationResult, error) {
 	text = strings.TrimSpace(text)
 	selectedAction := contextString(runtimeCtx, "selected_action")
 	selectedDraftID := contextInt64(runtimeCtx, "selected_draft_id")
@@ -815,6 +847,16 @@ func (s *Services) RejectDraft(ctx context.Context, openID, userName string, dra
 	user, err := s.ensureUser(ctx, openID, userName)
 	if err != nil {
 		return err
+	}
+	draft, err := s.Store.GetStructuredDraft(ctx, user.ID, draftID)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(draft.Status, "PENDING_CONFIRMATION") {
+		return fmt.Errorf("draft already resolved")
+	}
+	if draft.ExpiresAt != nil && time.Now().After(*draft.ExpiresAt) {
+		return fmt.Errorf("draft already resolved")
 	}
 	return s.Store.UpdateDraftStatus(ctx, user.ID, draftID, "REJECTED")
 }

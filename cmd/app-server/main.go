@@ -4,10 +4,12 @@ import (
 	"context"
 	"log"
 	"path/filepath"
+	"time"
 
 	"knowledgebook/internal/agent"
 	"knowledgebook/internal/api"
 	"knowledgebook/internal/config"
+	"knowledgebook/internal/conversation"
 	"knowledgebook/internal/database"
 	"knowledgebook/internal/feishu"
 	"knowledgebook/internal/llm"
@@ -44,6 +46,19 @@ func main() {
 	llmClient := llm.NewHTTPClient(cfg)
 	messenger := feishu.NewMessenger(cfg.FeishuAppID, cfg.FeishuAppSecret)
 	svc := service.New(store, cfg, runtimeAgent, llmClient, messenger)
+
+	// Wire up conversation agent
+	if llmClient.Enabled() {
+		convHistory := conversation.NewHistory(redisClient,
+			cfg.ConvHistoryMaxMessages,
+			time.Duration(cfg.ConvHistoryTTLMinutes)*time.Minute,
+		)
+		toolExecutor := conversation.NewToolExecutor(svc)
+		convAgent := conversation.NewAgent(llmClient, toolExecutor, convHistory, runtimeAgent.Prompt("system"))
+		svc.ConvAgent = convAgent
+		log.Printf("conversation agent enabled (history=%d msgs, ttl=%d min)", cfg.ConvHistoryMaxMessages, cfg.ConvHistoryTTLMinutes)
+	}
+
 	handler := api.NewHandler(svc, pool, redisClient)
 	server := api.NewServer(handler, cfg.AppPort)
 	if cfg.FeishuWSEnabled {

@@ -454,6 +454,10 @@ func (h *Handler) processCardAction(ctx stdctx.Context, action, chatID string, d
 	result := "暂不支持的卡片操作"
 	var cardMarkdownForUpdate string
 	resolvedAction := action
+
+	// Pre-fetch draft info for building richer resolved cards
+	draftInfo := h.fetchDraftInfo(ctx, openID, userName, draftID)
+
 	switch action {
 	case "confirm":
 		item, err := h.Services.ApproveDraft(ctx, openID, userName, draftID, "")
@@ -461,7 +465,7 @@ func (h *Handler) processCardAction(ctx stdctx.Context, action, chatID string, d
 			if strings.Contains(err.Error(), "already resolved") {
 				toastType = "warning"
 				result = fmt.Sprintf("草稿 #%d 已处理，请刷新查看最新状态。", draftID)
-				cardMarkdownForUpdate = fmt.Sprintf("# 草稿 #%d\n- 已处理（重复操作）", draftID)
+				cardMarkdownForUpdate = draftInfo.resolvedMarkdown("已处理（重复操作）")
 				resolvedAction = "expired"
 				break
 			}
@@ -471,13 +475,13 @@ func (h *Handler) processCardAction(ctx stdctx.Context, action, chatID string, d
 		}
 		toastType = "success"
 		result = fmt.Sprintf("已确认草稿 #%d，生成知识 #%d：%s", draftID, item.ID, item.Title)
-		cardMarkdownForUpdate = fmt.Sprintf("# 草稿 #%d\n- 标题：%s\n- 知识ID：#%d", draftID, item.Title, item.ID)
+		cardMarkdownForUpdate = draftInfo.confirmedMarkdown(item.ID, item.CategoryPath)
 	case "reject":
 		if err := h.Services.RejectDraft(ctx, openID, userName, draftID); err != nil {
 			if strings.Contains(err.Error(), "already resolved") {
 				toastType = "warning"
 				result = fmt.Sprintf("草稿 #%d 已处理，请刷新查看最新状态。", draftID)
-				cardMarkdownForUpdate = fmt.Sprintf("# 草稿 #%d\n- 已处理（重复操作）", draftID)
+				cardMarkdownForUpdate = draftInfo.resolvedMarkdown("已处理（重复操作）")
 				resolvedAction = "expired"
 				break
 			}
@@ -487,7 +491,7 @@ func (h *Handler) processCardAction(ctx stdctx.Context, action, chatID string, d
 		}
 		toastType = "success"
 		result = fmt.Sprintf("已丢弃草稿 #%d", draftID)
-		cardMarkdownForUpdate = fmt.Sprintf("# 草稿 #%d\n- 已丢弃", draftID)
+		cardMarkdownForUpdate = draftInfo.resolvedMarkdown("已丢弃")
 	case "change_category":
 		categoryPath := ""
 		for _, key := range []string{fmt.Sprintf("cat%d", draftID), "category_path"} {
@@ -506,6 +510,8 @@ func (h *Handler) processCardAction(ctx stdctx.Context, action, chatID string, d
 			if strings.Contains(err.Error(), "no rows") || strings.Contains(err.Error(), "already resolved") {
 				toastType = "warning"
 				result = fmt.Sprintf("草稿 #%d 已处理，不能再修改分类。", draftID)
+				cardMarkdownForUpdate = draftInfo.resolvedMarkdown("已处理（重复操作）")
+				resolvedAction = "expired"
 				break
 			}
 			toastType = "error"
@@ -542,6 +548,71 @@ func (h *Handler) processCardAction(ctx stdctx.Context, action, chatID string, d
 		}(openMessageID, cardMarkdownForUpdate, resolvedAction)
 	}
 	return response
+}
+
+// draftInfoForCard holds pre-fetched draft details for building resolved card markdown.
+type draftInfoForCard struct {
+	ID       int64
+	Title    string
+	Summary  string
+	Category string
+}
+
+// fetchDraftInfo loads draft details for card rendering. Returns a zero-value struct on failure.
+func (h *Handler) fetchDraftInfo(ctx stdctx.Context, openID, userName string, draftID int64) draftInfoForCard {
+	info := draftInfoForCard{ID: draftID}
+	user, err := h.Services.Store.EnsureUser(ctx, openID, userName)
+	if err != nil {
+		return info
+	}
+	draft, err := h.Services.Store.GetStructuredDraft(ctx, user.ID, draftID)
+	if err != nil {
+		return info
+	}
+	info.Title = draft.Title
+	info.Summary = draft.NormalizedSummary
+	info.Category = draft.RecommendedCategoryPath
+	return info
+}
+
+// resolvedMarkdown builds markdown for a resolved (rejected/expired/duplicate) card.
+func (d draftInfoForCard) resolvedMarkdown(statusLine string) string {
+	heading := d.Title
+	if heading == "" {
+		heading = fmt.Sprintf("草稿 #%d", d.ID)
+	}
+	lines := []string{fmt.Sprintf("# %s", heading)}
+	lines = append(lines, fmt.Sprintf("- 草稿ID：#%d", d.ID))
+	if d.Summary != "" {
+		lines = append(lines, fmt.Sprintf("- 摘要：%s", d.Summary))
+	}
+	if d.Category != "" {
+		lines = append(lines, fmt.Sprintf("- 分类：%s", d.Category))
+	}
+	lines = append(lines, fmt.Sprintf("- %s", statusLine))
+	return strings.Join(lines, "\n")
+}
+
+// confirmedMarkdown builds markdown for a successfully confirmed card.
+func (d draftInfoForCard) confirmedMarkdown(knowledgeID int64, categoryPath string) string {
+	heading := d.Title
+	if heading == "" {
+		heading = fmt.Sprintf("草稿 #%d", d.ID)
+	}
+	lines := []string{fmt.Sprintf("# %s", heading)}
+	lines = append(lines, fmt.Sprintf("- 草稿ID：#%d", d.ID))
+	if d.Summary != "" {
+		lines = append(lines, fmt.Sprintf("- 摘要：%s", d.Summary))
+	}
+	cat := categoryPath
+	if cat == "" {
+		cat = d.Category
+	}
+	if cat != "" {
+		lines = append(lines, fmt.Sprintf("- 分类：%s", cat))
+	}
+	lines = append(lines, fmt.Sprintf("- 知识ID：#%d", knowledgeID))
+	return strings.Join(lines, "\n")
 }
 
 func (h *Handler) CreateKnowledge(ctx stdctx.Context, c *app.RequestContext) {

@@ -27,8 +27,10 @@ type Config struct {
 	LLMFallbackEnabled        bool
 	AutoClassifyTop1Threshold float64
 	AutoClassifyGapThreshold  float64
-	SoftDeleteRetentionDays   int
-	AutoMigrate               bool
+	SoftDeleteRetentionDays    int
+	AutoMigrate                bool
+	ConvHistoryMaxMessages     int
+	ConvHistoryTTLMinutes      int
 }
 
 func Load() (Config, error) {
@@ -82,6 +84,14 @@ func Load() (Config, error) {
 		return cfg, err
 	}
 	cfg.AutoMigrate, err = getEnvBool("AUTO_MIGRATE", true)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.ConvHistoryMaxMessages, err = getEnvInt("CONV_HISTORY_MAX_MESSAGES", 20)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.ConvHistoryTTLMinutes, err = getEnvInt("CONV_HISTORY_TTL_MINUTES", 120)
 	if err != nil {
 		return cfg, err
 	}

@@ -30,18 +30,24 @@ type chatCompletionRequest struct {
 	Temperature    float64        `json:"temperature,omitempty"`
 	MaxTokens      int            `json:"max_tokens,omitempty"`
 	ResponseFormat map[string]any `json:"response_format,omitempty"`
+	Tools          []ToolDefinition `json:"tools,omitempty"`
+	ToolChoice     any              `json:"tool_choice,omitempty"`
 }
 
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type chatCompletionResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content   string     `json:"content"`
+			ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
@@ -131,6 +137,82 @@ func (c *HTTPClient) GenerateJSON(ctx context.Context, req GenerateJSONRequest) 
 		return nil, fmt.Errorf("llm api returned empty content")
 	}
 	return extractJSONObject(content)
+}
+
+// Chat sends a multi-turn conversation with optional tool definitions and returns
+// the model's reply or tool-call requests.
+func (c *HTTPClient) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	if !c.Enabled() {
+		return nil, fmt.Errorf("llm client disabled")
+	}
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = c.maxTokens
+	}
+	if maxTokens <= 0 {
+		maxTokens = 2000
+	}
+	messages := make([]chatMessage, 0, len(req.Messages))
+	for _, m := range req.Messages {
+		messages = append(messages, chatMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCallID: m.ToolCallID,
+			ToolCalls:  m.ToolCalls,
+		})
+	}
+	body := chatCompletionRequest{
+		Model:       c.model,
+		Messages:    messages,
+		Temperature: req.Temperature,
+		MaxTokens:   maxTokens,
+	}
+	if len(req.Tools) > 0 {
+		body.Tools = req.Tools
+		body.ToolChoice = "auto"
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, completionEndpoint(c.baseURL), bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("llm api error: %s", strings.TrimSpace(string(respBody)))
+	}
+	var parsed chatCompletionResponse
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return nil, fmt.Errorf("decode llm response failed: %w", err)
+	}
+	if parsed.Error != nil && parsed.Error.Message != "" {
+		return nil, fmt.Errorf("llm api error: %s", parsed.Error.Message)
+	}
+	if len(parsed.Choices) == 0 {
+		return nil, fmt.Errorf("llm api returned no choices")
+	}
+	choice := parsed.Choices[0]
+	result := &ChatResponse{
+		Content:      strings.TrimSpace(choice.Message.Content),
+		ToolCalls:    choice.Message.ToolCalls,
+		FinishReason: choice.FinishReason,
+	}
+	if len(result.ToolCalls) > 0 && result.FinishReason == "" {
+		result.FinishReason = "tool_calls"
+	}
+	return result, nil
 }
 
 func completionEndpoint(baseURL string) string {

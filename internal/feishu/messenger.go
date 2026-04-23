@@ -166,7 +166,7 @@ func (m *Messenger) PatchCard(ctx context.Context, messageID, cardJSON string) e
 
 // BuildResolvedCardJSON generates a card with resolved state (no action buttons).
 func BuildResolvedCardJSON(title, resolvedText, status string) string {
-	statusLabel := map[string]string{"confirm": "已确认保存", "reject": "已拒绝保存", "expired": "已过期失效"}[status]
+	statusLabel := map[string]string{"confirm": "已确认保存", "reject": "已拒绝保存", "expired": "已过期失效", "revised": "已修订为新草稿"}[status]
 	if statusLabel == "" {
 		statusLabel = "已处理"
 	}

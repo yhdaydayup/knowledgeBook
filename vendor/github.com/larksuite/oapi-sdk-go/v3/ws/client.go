@@ -412,7 +412,6 @@ func (c *Client) handleDataFrame(ctx context.Context, frame Frame) {
 		}
 	}
 
-	c.logger.Info(ctx, c.fmtLog("[ws_frame] type=%s message_id=%s trace_id=%s payload_len=%d", type_, msgID, traceID, len(pl))...)
 	c.logger.Debug(ctx, c.fmtLog("receive message, message_type: %s, message_id: %s, trace_id: %s, payload: %s",
 		type_, msgID, traceID, pl))
 
@@ -423,11 +422,8 @@ func (c *Client) handleDataFrame(ctx context.Context, frame Frame) {
 	case MessageTypeEvent:
 		rsp, err = c.eventHandler.Do(ctx, pl)
 	case MessageTypeCard:
-		c.logger.Info(ctx, c.fmtLog("[ws_card_frame] message_id=%s trace_id=%s payload=%s", msgID, traceID, string(pl))...)
-		rsp, err = c.eventHandler.Do(ctx, pl)
-		c.logger.Info(ctx, c.fmtLog("[ws_card_frame_result] message_id=%s rsp=%v err=%v", msgID, rsp, err)...)
+		return
 	default:
-		c.logger.Warn(ctx, c.fmtLog("[ws_frame_unknown] type=%s message_id=%s", type_, msgID)...)
 		return
 	}
 	end := time.Now().UnixNano() / int64(time.Millisecond)
